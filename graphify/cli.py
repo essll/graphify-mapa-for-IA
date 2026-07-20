@@ -915,6 +915,75 @@ def dispatch_command(cmd: str) -> None:
             print(f"error: {exc}", file=sys.stderr)
             sys.exit(1)
 
+    elif cmd == "config":
+        from graphify.config import get_config, reset_config
+        import json as _json
+        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        if subcmd == "show" or subcmd == "":
+            cfg = get_config()
+            print(_json.dumps({
+                "dedup": cfg.dedup.model_dump(),
+                "cluster": cfg.cluster.model_dump(),
+                "query": cfg.query.model_dump(),
+                "graph": cfg.graph.model_dump(),
+                "cache": cfg.cache.model_dump(),
+                "security": cfg.security.model_dump(),
+                "log_level": cfg.log_level,
+                "no_backup": cfg.no_backup,
+            }, indent=2, ensure_ascii=False))
+        elif subcmd == "set":
+            if len(sys.argv) < 4:
+                print("Usage: graphify config --set <key>=<value>", file=sys.stderr)
+                sys.exit(1)
+            # Parse key=value pairs
+            for arg in sys.argv[3:]:
+                if "=" not in arg:
+                    print(f"Invalid format: {arg} (expected key=value)", file=sys.stderr)
+                    sys.exit(1)
+                key, value = arg.split("=", 1)
+                # Set via environment variable (pydantic-settings reads from env)
+                os.environ[f"GRAPHIFY_{key.upper()}"] = value
+            print("Config updated. Restart graphify for changes to take effect.")
+        elif subcmd == "reset":
+            reset_config()
+            # Clear env vars that might override
+            for key in list(os.environ.keys()):
+                if key.startswith("GRAPHIFY_"):
+                    del os.environ[key]
+            print("Config reset to defaults. Restart graphify for changes to take effect.")
+        else:
+            print("Usage: graphify config [show|--set key=value|--reset]", file=sys.stderr)
+            sys.exit(1)
+    elif cmd == "cache":
+        from graphify.persistent_cache import get_cache_stats, clear_all_caches
+        subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        if subcmd == "stats" or subcmd == "":
+            stats = get_cache_stats()
+            print(json.dumps(stats, indent=2, ensure_ascii=False))
+        elif subcmd == "clear":
+            namespace = None
+            args = sys.argv[3:]
+            i = 0
+            while i < len(args):
+                if args[i] == "--namespace" and i + 1 < len(args):
+                    namespace = args[i + 1]
+                    i += 2
+                elif args[i].startswith("--namespace="):
+                    namespace = args[i].split("=", 1)[1]
+                    i += 1
+                else:
+                    i += 1
+            if namespace:
+                from graphify.persistent_cache import PersistentCache
+                cache = PersistentCache(namespace, 7)  # TTL doesn't matter for clear
+                count = cache.clear()
+                print(f"Cleared {count} entries from cache namespace '{namespace}'")
+            else:
+                cleared = clear_all_caches()
+                print(f"Cleared all caches: {cleared}")
+        else:
+            print("Usage: graphify cache [stats|clear [--namespace NAME]]", file=sys.stderr)
+            sys.exit(1)
     elif cmd == "watch":
         watch_path = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(".")
         if not watch_path.exists():
