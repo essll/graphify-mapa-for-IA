@@ -1,5 +1,6 @@
 # MCP stdio server - exposes graph query tools to Claude and other agents
 from __future__ import annotations
+import hashlib
 import json
 import math
 import re
@@ -11,6 +12,8 @@ from networkx.readwrite import json_graph
 from graphify.security import sanitize_label, check_graph_file_size_cap
 from graphify.build import edge_data
 from graphify.paths import default_graph_json as _default_graph_json
+from graphify.config import get_config
+from graphify.persistent_cache import get_trigram_cache, get_idf_cache
 
 try:
     import jieba as _jieba  # type: ignore[import-untyped]
@@ -59,6 +62,9 @@ def _load_graph(graph_path: str) -> nx.Graph:
         sys.exit(1)
     except json.JSONDecodeError as exc:
         print(f"error: graph.json is corrupted ({exc}). Re-run /graphify to rebuild.", file=sys.stderr)
+        sys.exit(1)
+    except Exception as exc:
+        print(f"error: unexpected error loading graph: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -153,13 +159,21 @@ _SOURCE_MATCH_BONUS = 0.5
 
 
 def _compute_idf(G: nx.Graph, terms: list[str]) -> dict[str, float]:
-    """IDF weights for query terms, cached in G.graph['_idf_cache'].
+    """IDF weights for query terms, with persistent cache fallback.
 
     Common terms like 'error' or 'exception' that match hundreds of nodes get
     low weights; rare identifiers like 'FooBarService' get high weights.
-    Cache is stored on the graph object itself so it auto-invalidates when
-    a hot-reload replaces G with a new object.
+    First checks persistent cache, then falls back to in-memory cache on G.graph.
     """
+    # Try persistent cache first
+    idf_cache = get_idf_cache()
+    cache_key = f"idf_{hashlib.sha256(' '.join(sorted(terms)).encode()).hexdigest()[:16]}"
+    
+    cached = idf_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    
+    # Fallback to in-memory cache on graph object
     cache: dict[str, float] = G.graph.setdefault("_idf_cache", {})
     N = G.number_of_nodes() or 1
     uncached = [t for t in terms if t not in cache]
@@ -174,7 +188,13 @@ def _compute_idf(G: nx.Graph, terms: list[str]) -> dict[str, float]:
                     df[t] += 1
         for t in uncached:
             cache[t] = math.log(1 + N / (1 + df[t]))
-    return {t: cache.get(t, math.log(1 + N)) for t in terms}
+    
+    result = {t: cache.get(t, math.log(1 + N)) for t in terms}
+    
+    # Store in persistent cache for future runs
+    idf_cache.set(cache_key, result)
+    
+    return result
 
 
 def _trigrams(text: str) -> set[str]:
